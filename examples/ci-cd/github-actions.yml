@@ -1,0 +1,21 @@
+name: UiGraph Sync
+
+on:
+  push:
+    branches: [main, master]
+
+jobs:
+  uigraph-sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install UiGraph CLI
+        run: |
+          curl -sSL https://cli.uigraph.app/install.sh | sh
+
+      - name: Sync service to UiGraph
+        env:
+          UIGRAPH_TOKEN: ${{ secrets.UIGRAPH_TOKEN }}
+        run: |
+          uigraph sync

@@ -1,0 +1,427 @@
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/spf13/cobra"
+	"github.com/uigraph/uigraph-cli/pkg/config"
+	"github.com/uigraph/uigraph-cli/pkg/gateway"
+	"github.com/uigraph/uigraph-cli/pkg/git"
+)
+
+var (
+	configPath string
+	apiURL     string
+	dryRun     bool
+)
+
+var syncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Sync service and APIs to UiGraph Gateway",
+	Long: `Reads .uigraph.yaml, captures git metadata, and syncs service, API groups, architecture diagrams, test packs/test cases, and database schemas (when configured) to the gateway.
+This command is designed to run in CI/CD environments and requires UIGRAPH_TOKEN environment variable.`,
+	RunE: runSync,
+}
+
+func init() {
+	syncCmd.Flags().StringVar(&configPath, "config", ".uigraph.yaml", "Path to config file")
+	syncCmd.Flags().StringVar(&apiURL, "api-url", "https://api.prod.uigraph.app/uigraph-gateway", "Gateway API URL")
+	syncCmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print payloads without sending to gateway")
+}
+
+func exitGatewayError(action string) {
+	fmt.Fprintf(os.Stderr, "Error: failed to %s. Please try again.\n", action)
+	os.Exit(2)
+}
+
+// pluralize returns singular or plural form based on count
+func pluralize(count int, singular, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
+}
+
+// formatDuration formats duration in a human-readable way
+func formatDuration(d time.Duration) string {
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.1fs", d.Seconds())
+}
+
+func runSync(cmd *cobra.Command, args []string) error {
+	startTime := time.Now()
+	ctx := cmd.Context()
+
+	// 1. Authenticate using UIGRAPH_TOKEN
+	token := os.Getenv("UIGRAPH_TOKEN")
+	if token == "" {
+		fmt.Fprintln(os.Stderr, "Error: UIGRAPH_TOKEN environment variable is required")
+		os.Exit(1)
+	}
+
+	// 2. Load and validate config
+	fmt.Printf("📦 Loading config from: %s\n", configPath)
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Config error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "Validation error: %v\n", err)
+		os.Exit(1)
+	}
+
+	// 3. Capture git metadata
+	fmt.Println("🔍 Capturing git metadata...")
+	gitMeta := git.CaptureMetadata()
+	if gitMeta.CommitHash == "" {
+		fmt.Println("  ⚠️  Warning: Git metadata unavailable, continuing without it")
+	} else {
+		fmt.Printf("  • Commit: %s\n", gitMeta.CommitHash)
+		fmt.Printf("  • Branch: %s\n", gitMeta.Branch)
+		if gitMeta.IsDirty {
+			fmt.Println("  ⚠️  Status: dirty (uncommitted changes)")
+		}
+	}
+
+	// 4. Initialize gateway client
+	client := gateway.NewClient(apiURL, token)
+
+	// 5. Sync service
+	fmt.Printf("\n🚀 Syncing service: %s\n", cfg.Service.Name)
+
+	syncReq := gateway.ServiceSyncRequest{
+		Project: cfg.Project,
+		Service: cfg.Service,
+		Git:     gitMeta,
+		Source: gateway.Source{
+			Type: "ci",
+			Tool: "uigraph-cli",
+		},
+	}
+
+	if dryRun {
+		fmt.Println("\n=== DRY RUN: Service Sync Request ===")
+		syncReq.Print()
+	} else {
+		serviceResp, err := client.SyncService(ctx, syncReq)
+		if err != nil {
+			exitGatewayError("sync service")
+		}
+		// We intentionally ignore service ID; UX only cares about the name.
+		_ = serviceResp
+		fmt.Printf("✓ Service synced: %s\n", cfg.Service.Name)
+	}
+
+	// 6. Sync API groups
+	if len(cfg.APIs) > 0 {
+		fmt.Printf("\n📡 Syncing %d API %s...\n", len(cfg.APIs), pluralize(len(cfg.APIs), "group", "groups"))
+
+		for _, api := range cfg.APIs {
+			fmt.Printf("  • %s (%s)\n", api.Name, api.Type)
+
+			// Read spec file
+			specContent, err := os.ReadFile(api.Path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "    Error reading spec file %s: %v\n", api.Path, err)
+				os.Exit(1)
+			}
+
+			apiReq := gateway.APIGroupSyncRequest{
+				APIGroup: gateway.APIGroup{
+					Name: api.Name,
+					Type: api.Type,
+				},
+				Spec: gateway.Spec{
+					Content: string(specContent),
+					Path:    api.Path,
+				},
+				Git: gateway.GitMetadataMinimal{
+					CommitHash: gitMeta.CommitHash,
+				},
+				// Let the gateway resolve serviceId from service name
+				ServiceName: cfg.Service.Name,
+			}
+
+			if dryRun {
+				fmt.Printf("\n=== DRY RUN: API Group Sync Request (%s) ===\n", api.Name)
+				apiReq.Print()
+			} else {
+				apiResp, err := client.SyncAPIGroup(ctx, apiReq)
+				if err != nil {
+					exitGatewayError(fmt.Sprintf("sync API group %q", api.Name))
+				}
+				fmt.Printf("    ✓ API group synced\n")
+				_ = apiResp
+			}
+		}
+	}
+
+	// 7. Sync architecture diagrams
+	if len(cfg.ArchitectureDiagrams) > 0 {
+		fmt.Printf("\n📊 Syncing %d architecture %s...\n", len(cfg.ArchitectureDiagrams), pluralize(len(cfg.ArchitectureDiagrams), "diagram", "diagrams"))
+
+		for _, ad := range cfg.ArchitectureDiagrams {
+			fmt.Printf("  • %s\n", ad.Name)
+
+			mermaidContent, err := os.ReadFile(ad.Path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "    Error reading mermaid file %s: %v\n", ad.Path, err)
+				os.Exit(1)
+			}
+
+			req := gateway.ArchitectureDiagramSyncRequest{
+				ServiceName:    cfg.Service.Name,
+				Name:           ad.Name,
+				MermaidContent: string(mermaidContent),
+				GitCommitHash:  gitMeta.CommitHash,
+			}
+			if ad.ContextPath != "" {
+				contextContent, err := os.ReadFile(ad.ContextPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "    Error reading context file %s: %v\n", ad.ContextPath, err)
+					os.Exit(1)
+				}
+				req.ContextContent = string(contextContent)
+			}
+
+			if dryRun {
+				fmt.Printf("\n=== DRY RUN: Architecture Diagram (%s) ===\n", ad.Name)
+				fmt.Printf("  Path: %s, ContextPath: %s, Mermaid size: %d bytes\n", ad.Path, ad.ContextPath, len(req.MermaidContent))
+			} else {
+				archResp, err := client.SyncArchitectureDiagram(ctx, req)
+				if err != nil {
+					exitGatewayError(fmt.Sprintf("sync architecture diagram %q", ad.Name))
+				}
+				versionNote := ""
+				if archResp.VersionCreated {
+					versionNote = " (new version)"
+				}
+				fmt.Printf("    ✓ Architecture diagram synced: %s%s\n", ad.Name, versionNote)
+				_ = archResp
+			}
+		}
+	}
+
+	// 8. Sync test packs and test cases
+	totalTestCases := 0
+	for _, pack := range cfg.TestPacks {
+		totalTestCases += len(pack.TestCases)
+	}
+	if len(cfg.TestPacks) > 0 {
+		fmt.Printf("\n🧪 Syncing %d test %s (%d test %s)...\n",
+			len(cfg.TestPacks), pluralize(len(cfg.TestPacks), "pack", "packs"),
+			totalTestCases, pluralize(totalTestCases, "case", "cases"))
+
+		gitMinimal := gateway.GitMetadataMinimal{CommitHash: gitMeta.CommitHash}
+		serviceName := cfg.Service.Name
+
+		for _, pack := range cfg.TestPacks {
+			fmt.Printf("  • %s (%s)\n", pack.Name, pack.Type)
+
+			// Build test pack payload with optional pointers
+			packPayload := gateway.TestPackInfoPayload{
+				Name: pack.Name,
+				Type: pack.Type,
+			}
+			if pack.Environment != "" {
+				packPayload.Environment = &pack.Environment
+			}
+			if pack.ReleaseLabel != "" {
+				packPayload.ReleaseLabel = &pack.ReleaseLabel
+			}
+
+			packReq := gateway.TestPackSyncRequest{
+				TestPack:    packPayload,
+				Git:         gitMinimal,
+				ServiceName: serviceName,
+			}
+
+			if dryRun {
+				fmt.Printf("\n=== DRY RUN: Test Pack (%s) ===\n", pack.Name)
+				fmt.Printf("  Name: %s, Type: %s, TestCases: %d\n", pack.Name, pack.Type, len(pack.TestCases))
+				for _, tc := range pack.TestCases {
+					fmt.Printf("    - %s (type: %s, order: %g)\n", tc.Title, tc.Type, tc.Order)
+				}
+			} else {
+				packResp, err := client.SyncTestPack(ctx, packReq)
+				if err != nil {
+					exitGatewayError(fmt.Sprintf("sync test pack %q", pack.Name))
+				}
+				fmt.Printf("    ✓ Test pack synced: %s\n", pack.Name)
+
+				// Sync test cases for this pack
+				for _, tc := range pack.TestCases {
+					tcPayload := gateway.TestCaseInfoPayload{
+						Type:             tc.Type,
+						Title:            tc.Title,
+						Order:            tc.Order,
+						RequiresEvidence: tc.RequiresEvidence,
+						IsCritical:       tc.IsCritical,
+					}
+					if tc.Description != "" {
+						tcPayload.Description = &tc.Description
+					}
+					if tc.Priority != "" {
+						tcPayload.Priority = &tc.Priority
+					}
+					if len(tc.Tags) > 0 {
+						tcPayload.Labels = tc.Tags
+					}
+					if tc.LinkedTicket != "" {
+						tcPayload.LinkedTicket = &tc.LinkedTicket
+					}
+					if tc.EstimatedDurationMins > 0 {
+						mins := tc.EstimatedDurationMins
+						tcPayload.EstimatedDurationMins = &mins
+					}
+					if tc.TestOwner != "" {
+						tcPayload.TestOwner = &tc.TestOwner
+					}
+					if tc.MapName != "" {
+						tcPayload.MapName = &tc.MapName
+					}
+					if tc.FrameName != "" {
+						tcPayload.FrameName = &tc.FrameName
+					}
+					if tc.FocalPointName != "" {
+						tcPayload.FocalPointName = &tc.FocalPointName
+					}
+					if tc.APIGroupName != "" {
+						tcPayload.APIGroupName = &tc.APIGroupName
+					}
+					if tc.OperationID != "" {
+						tcPayload.OperationID = &tc.OperationID
+					}
+					if tc.ExpectedStatusCode != 0 {
+						tcPayload.ExpectedStatusCode = &tc.ExpectedStatusCode
+					}
+					if tc.RequestTemplate != "" {
+						tcPayload.RequestTemplate = &tc.RequestTemplate
+					}
+					if tc.ResponseTimeMs > 0 {
+						ms := tc.ResponseTimeMs
+						tcPayload.MaxResponseTimeMs = &ms
+					}
+					if tc.ResponseBody != "" {
+						body := tc.ResponseBody
+						tcPayload.ResponseBody = &body
+					}
+					if len(tc.Assertions) > 0 {
+						tcPayload.Assertions = make([]gateway.AssertionPayload, len(tc.Assertions))
+						for i, a := range tc.Assertions {
+							tcPayload.Assertions[i] = gateway.AssertionPayload{
+								Field: a.Field,
+								Type:  a.Type,
+								Value: a.Value,
+							}
+						}
+					}
+					if len(tc.StepsList) > 0 {
+						tcPayload.StepsList = make([]gateway.TestCaseStepPayload, len(tc.StepsList))
+						for i, s := range tc.StepsList {
+							tcPayload.StepsList[i] = gateway.TestCaseStepPayload{Action: s.Action, ExpectedResult: s.ExpectedResult}
+						}
+					}
+					if tc.ExpectedOutcome != "" {
+						tcPayload.ExpectedOutcome = &tc.ExpectedOutcome
+					}
+					if tc.Preconditions != "" {
+						tcPayload.Preconditions = &tc.Preconditions
+					}
+					if tc.TestData != "" {
+						tcPayload.TestData = &tc.TestData
+					}
+					if tc.Postconditions != "" {
+						tcPayload.Postconditions = &tc.Postconditions
+					}
+
+					tcReq := gateway.TestCaseSyncRequest{
+						TestCase:     tcPayload,
+						Git:          gitMinimal,
+						TestPackName: pack.Name,
+						TestPackID:   packResp.TestPackID,
+						ServiceName:  serviceName,
+					}
+
+					tcResp, err := client.SyncTestCase(ctx, tcReq)
+					if err != nil {
+						exitGatewayError(fmt.Sprintf("sync test case %q", tc.Title))
+					}
+					fmt.Printf("      ✓ Test case synced: %s\n", tc.Title)
+					_ = tcResp
+				}
+			}
+		}
+		if dryRun {
+			fmt.Printf("\n=== DRY RUN: would sync %d test pack(s), %d test case(s)\n", len(cfg.TestPacks), totalTestCases)
+		}
+	}
+
+	// 9. Sync service databases
+	if len(cfg.Databases) > 0 {
+		fmt.Printf("\n🗄️  Syncing %d database %s...\n", len(cfg.Databases), pluralize(len(cfg.Databases), "schema", "schemas"))
+		gitMinimal := gateway.GitMetadataMinimal{CommitHash: gitMeta.CommitHash}
+		serviceName := cfg.Service.Name
+
+		for _, db := range cfg.Databases {
+			fmt.Printf("  • %s (%s)\n", db.Name, db.Dialect)
+
+			schemaBytes, err := os.ReadFile(db.SchemaPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "    Error reading schema file %s: %v\n", db.SchemaPath, err)
+				os.Exit(1)
+			}
+
+			req := gateway.ServiceDatabaseSyncRequest{
+				ServiceName:       serviceName,
+				DBName:            db.Name,
+				Dialect:           db.Dialect,
+				DBType:            db.DBType,
+				SchemaFileContent: string(schemaBytes),
+				Git:               gitMinimal,
+			}
+
+			if dryRun {
+				fmt.Printf("\n=== DRY RUN: Service Database (%s) ===\n", db.Name)
+				fmt.Printf("  SchemaPath: %s, size: %d bytes\n", db.SchemaPath, len(schemaBytes))
+			} else {
+				resp, err := client.SyncServiceDatabase(ctx, req)
+				if err != nil {
+					exitGatewayError(fmt.Sprintf("sync database schema %q", db.Name))
+				}
+				versionNote := ""
+				if resp.VersionCreated {
+					versionNote = " (new version)"
+				}
+				fmt.Printf("    ✓ Database schema synced: %s%s\n", db.Name, versionNote)
+			}
+		}
+	}
+
+	// 10. Print summary
+	elapsed := time.Since(startTime)
+	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Println("📋 Sync Summary")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	fmt.Printf("Service: %s\n", cfg.Service.Name)
+	if gitMeta.CommitHash != "" {
+		fmt.Printf("Commit: %s\n", gitMeta.CommitHash)
+	}
+	fmt.Printf("API Groups: %d\n", len(cfg.APIs))
+	fmt.Printf("Architecture Diagrams: %d\n", len(cfg.ArchitectureDiagrams))
+	fmt.Printf("Test Packs: %d\n", len(cfg.TestPacks))
+	fmt.Printf("Test Cases: %d\n", totalTestCases)
+	fmt.Printf("Databases: %d\n", len(cfg.Databases))
+	fmt.Printf("Duration: %s\n", formatDuration(elapsed))
+	if dryRun {
+		fmt.Println("\n(Dry run - no data sent to gateway)")
+	}
+
+	return nil
+}

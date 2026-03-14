@@ -1,0 +1,279 @@
+package config
+
+import (
+	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config represents the .uigraph.yaml structure
+type Config struct {
+	Version              int              `yaml:"version"`
+	Project              Project          `yaml:"project"`
+	Service              Service          `yaml:"service"`
+	APIs                 []APIRef         `yaml:"apis"`
+	ArchitectureDiagrams []ArchDiagramRef `yaml:"architectureDiagrams,omitempty"`
+	TestPacks            []TestPackRef    `yaml:"testPacks,omitempty"`
+	Databases            []DatabaseRef    `yaml:"databases,omitempty"`
+}
+
+// Project represents project-level metadata
+type Project struct {
+	Name        string `yaml:"name"`
+	Environment string `yaml:"environment,omitempty"`
+}
+
+// Service represents service metadata
+type Service struct {
+	Name         string       `yaml:"name"`
+	Category     string       `yaml:"category"`
+	Description  string       `yaml:"description"`
+	Repository   Repository   `yaml:"repository"`
+	Ownership    Ownership    `yaml:"ownership"`
+	Labels       []string     `yaml:"labels,omitempty"`
+	Integrations Integrations `yaml:"integrations,omitempty"`
+}
+
+// Repository represents repository information
+type Repository struct {
+	Provider string `yaml:"provider"`
+	URL      string `yaml:"url"`
+}
+
+// Ownership represents ownership information
+type Ownership struct {
+	Team  string `yaml:"team,omitempty"`
+	Email string `yaml:"email,omitempty"`
+}
+
+// Integrations represents external integrations
+type Integrations struct {
+	Jira  *Integration `yaml:"jira,omitempty"`
+	Slack *Integration `yaml:"slack,omitempty"`
+}
+
+// Integration represents a single integration
+type Integration struct {
+	URL string `yaml:"url"`
+}
+
+// APIRef represents an API reference in the config
+type APIRef struct {
+	Name string `yaml:"name"`
+	Type string `yaml:"type"`
+	Path string `yaml:"path"`
+}
+
+// ArchDiagramRef represents an architecture diagram (mermaid) reference in the config
+type ArchDiagramRef struct {
+	Name        string `yaml:"name"`
+	Path        string `yaml:"path"`
+	ContextPath string `yaml:"contextPath,omitempty"`
+}
+
+// TestPackRef represents a test pack and its test cases in the config
+type TestPackRef struct {
+	Name         string        `yaml:"name"`
+	Type         string        `yaml:"type"` // smoke | regression | manual
+	Environment  string        `yaml:"environment,omitempty"`
+	ReleaseLabel string        `yaml:"releaseLabel,omitempty"`
+	TestCases    []TestCaseRef `yaml:"testCases,omitempty"`
+}
+
+// StepRef represents a single manual step with optional expected result
+type StepRef struct {
+	Action         string `yaml:"action"`
+	ExpectedResult string `yaml:"expectedResult,omitempty"`
+}
+
+// AssertionRef represents an API assertion (field, type, value) in YAML.
+type AssertionRef struct {
+	Field string `yaml:"field"`
+	Type  string `yaml:"type"`
+	Value string `yaml:"value"`
+}
+
+// TestCaseRef represents a test case in the config
+type TestCaseRef struct {
+	Type  string  `yaml:"type"` // api | manual
+	Title string  `yaml:"title"`
+	Order float64 `yaml:"order"`
+
+	// Common optional
+	Description           string   `yaml:"description,omitempty"`
+	Priority              string   `yaml:"priority,omitempty"` // p0 | p1 | p2 | p3
+	Tags                  []string `yaml:"tags,omitempty"`
+	LinkedTicket          string   `yaml:"linkedTicket,omitempty"`
+	EstimatedDurationMins int      `yaml:"estimatedDurationMins,omitempty"`
+	TestOwner             string   `yaml:"testOwner,omitempty"`
+
+	// Map/Frame/Focal Point Reference (will be resolved to linkedMapNodeId internally)
+	MapName        string `yaml:"mapName,omitempty"`        // Map (Project) name
+	FrameName      string `yaml:"frameName,omitempty"`      // Frame (Page) name
+	FocalPointName string `yaml:"focalPointName,omitempty"` // Focal Point name
+
+	// API-specific
+	APIGroupName       string         `yaml:"apiGroupName,omitempty"`
+	OperationID        string         `yaml:"operationId,omitempty"`
+	ExpectedStatusCode int            `yaml:"expectedStatusCode,omitempty"`
+	RequestTemplate    string         `yaml:"requestTemplate,omitempty"`
+	ResponseTimeMs     int            `yaml:"responseTimeMs,omitempty"`
+	ResponseBody       string         `yaml:"responseBody,omitempty"`
+	Assertions         []AssertionRef `yaml:"assertions,omitempty"`
+
+	// Manual-specific: stepsList (action + optional expectedResult per step)
+	StepsList        []StepRef `yaml:"stepsList,omitempty"`
+	ExpectedOutcome  string    `yaml:"expectedOutcome,omitempty"`
+	Preconditions    string    `yaml:"preconditions,omitempty"`
+	TestData         string    `yaml:"testData,omitempty"`
+	Postconditions   string    `yaml:"postconditions,omitempty"`
+	RequiresEvidence bool      `yaml:"requiresEvidence"`
+	IsCritical       bool      `yaml:"isCritical"`
+}
+
+// DatabaseRef represents a service database schema to sync (path to JSON schema file)
+type DatabaseRef struct {
+	Name       string `yaml:"name"`             // logical DB name (dbName)
+	Dialect    string `yaml:"dialect"`          // postgres, mysql, sqlite, dynamodb, mongodb, other
+	DBType     string `yaml:"dbType,omitempty"` // optional e.g. Postgres, MySQL
+	SchemaPath string `yaml:"schemaPath"`       // path to JSON file (tables or noSQLSchema)
+}
+
+// Load reads and parses the config file
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to parse YAML: %w", err)
+	}
+
+	return &cfg, nil
+}
+
+// Validate checks if the config has all required fields
+func (c *Config) Validate() error {
+	// Version check
+	if c.Version != 1 {
+		return fmt.Errorf("unsupported config version: %d (expected 1)", c.Version)
+	}
+
+	// Project validation
+	if c.Project.Name == "" {
+		return fmt.Errorf("project.name is required")
+	}
+
+	// Service validation
+	if c.Service.Name == "" {
+		return fmt.Errorf("service.name is required")
+	}
+	if c.Service.Category == "" {
+		return fmt.Errorf("service.category is required")
+	}
+	if c.Service.Description == "" {
+		return fmt.Errorf("service.description is required")
+	}
+
+	// Repository validation
+	if c.Service.Repository.Provider == "" {
+		return fmt.Errorf("service.repository.provider is required")
+	}
+	validProviders := map[string]bool{"github": true, "gitlab": true, "bitbucket": true}
+	if !validProviders[c.Service.Repository.Provider] {
+		return fmt.Errorf("service.repository.provider must be one of: github, gitlab, bitbucket")
+	}
+	if c.Service.Repository.URL == "" {
+		return fmt.Errorf("service.repository.url is required")
+	}
+
+	// API validation
+	for i, api := range c.APIs {
+		if api.Name == "" {
+			return fmt.Errorf("apis[%d].name is required", i)
+		}
+		if api.Type == "" {
+			return fmt.Errorf("apis[%d].type is required", i)
+		}
+		validTypes := map[string]bool{"openapi": true, "graphql": true, "grpc": true}
+		if !validTypes[api.Type] {
+			return fmt.Errorf("apis[%d].type must be one of: openapi, graphql, grpc", i)
+		}
+		if api.Path == "" {
+			return fmt.Errorf("apis[%d].path is required", i)
+		}
+		// Check if file exists
+		if _, err := os.Stat(api.Path); os.IsNotExist(err) {
+			return fmt.Errorf("apis[%d].path file does not exist: %s", i, api.Path)
+		}
+	}
+
+	// Architecture diagrams validation (optional)
+	for i, ad := range c.ArchitectureDiagrams {
+		if ad.Name == "" {
+			return fmt.Errorf("architectureDiagrams[%d].name is required", i)
+		}
+		if ad.Path == "" {
+			return fmt.Errorf("architectureDiagrams[%d].path is required", i)
+		}
+		if _, err := os.Stat(ad.Path); os.IsNotExist(err) {
+			return fmt.Errorf("architectureDiagrams[%d].path file does not exist: %s", i, ad.Path)
+		}
+		if ad.ContextPath != "" {
+			if _, err := os.Stat(ad.ContextPath); os.IsNotExist(err) {
+				return fmt.Errorf("architectureDiagrams[%d].contextPath file does not exist: %s", i, ad.ContextPath)
+			}
+		}
+	}
+
+	// Test packs validation (optional)
+	validTestPackTypes := map[string]bool{"smoke": true, "regression": true, "manual": true}
+	validTestCaseTypes := map[string]bool{"api": true, "manual": true}
+	for i, pack := range c.TestPacks {
+		if pack.Name == "" {
+			return fmt.Errorf("testPacks[%d].name is required", i)
+		}
+		if pack.Type == "" {
+			return fmt.Errorf("testPacks[%d].type is required", i)
+		}
+		if !validTestPackTypes[pack.Type] {
+			return fmt.Errorf("testPacks[%d].type must be one of: smoke, regression, manual", i)
+		}
+		for j, tc := range pack.TestCases {
+			if tc.Type == "" {
+				return fmt.Errorf("testPacks[%d].testCases[%d].type is required", i, j)
+			}
+			if !validTestCaseTypes[tc.Type] {
+				return fmt.Errorf("testPacks[%d].testCases[%d].type must be one of: api, manual", i, j)
+			}
+			if tc.Title == "" {
+				return fmt.Errorf("testPacks[%d].testCases[%d].title is required", i, j)
+			}
+		}
+	}
+
+	// Databases validation (optional)
+	validDialects := map[string]bool{"postgres": true, "mysql": true, "sqlite": true, "dynamodb": true, "mongodb": true, "other": true}
+	for i, db := range c.Databases {
+		if db.Name == "" {
+			return fmt.Errorf("databases[%d].name is required", i)
+		}
+		if db.Dialect == "" {
+			return fmt.Errorf("databases[%d].dialect is required", i)
+		}
+		if !validDialects[db.Dialect] {
+			return fmt.Errorf("databases[%d].dialect must be one of: postgres, mysql, sqlite, dynamodb, mongodb, other", i)
+		}
+		if db.SchemaPath == "" {
+			return fmt.Errorf("databases[%d].schemaPath is required", i)
+		}
+		if _, err := os.Stat(db.SchemaPath); os.IsNotExist(err) {
+			return fmt.Errorf("databases[%d].schemaPath file does not exist: %s", i, db.SchemaPath)
+		}
+	}
+
+	return nil
+}
