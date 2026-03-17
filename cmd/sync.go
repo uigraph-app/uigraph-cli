@@ -118,7 +118,48 @@ func runSync(cmd *cobra.Command, args []string) error {
 		fmt.Printf("✓ Service synced: %s\n", cfg.Service.Name)
 	}
 
-	// 6. Sync API groups
+	// 6. Sync service databases
+	if len(cfg.Databases) > 0 {
+		fmt.Printf("\n🗄️  Syncing %d database %s...\n", len(cfg.Databases), pluralize(len(cfg.Databases), "schema", "schemas"))
+		gitMinimal := gateway.GitMetadataMinimal{CommitHash: gitMeta.CommitHash}
+		serviceName := cfg.Service.Name
+
+		for _, db := range cfg.Databases {
+			fmt.Printf("  • %s (%s)\n", db.Name, db.Dialect)
+
+			schemaBytes, err := os.ReadFile(db.SchemaPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "    Error reading schema file %s: %v\n", db.SchemaPath, err)
+				os.Exit(1)
+			}
+
+			req := gateway.ServiceDatabaseSyncRequest{
+				ServiceName:       serviceName,
+				DBName:            db.Name,
+				Dialect:           db.Dialect,
+				DBType:            db.DBType,
+				SchemaFileContent: string(schemaBytes),
+				Git:               gitMinimal,
+			}
+
+			if dryRun {
+				fmt.Printf("\n=== DRY RUN: Service Database (%s) ===\n", db.Name)
+				fmt.Printf("  SchemaPath: %s, size: %d bytes\n", db.SchemaPath, len(schemaBytes))
+			} else {
+				resp, err := client.SyncServiceDatabase(ctx, req)
+				if err != nil {
+					exitGatewayError(fmt.Sprintf("sync database schema %q", db.Name))
+				}
+				versionNote := ""
+				if resp.VersionCreated {
+					versionNote = " (new version)"
+				}
+				fmt.Printf("    ✓ Database schema synced: %s%s\n", db.Name, versionNote)
+			}
+		}
+	}
+
+	// 7. Sync API groups
 	if len(cfg.APIs) > 0 {
 		fmt.Printf("\n📡 Syncing %d API %s...\n", len(cfg.APIs), pluralize(len(cfg.APIs), "group", "groups"))
 
@@ -162,7 +203,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 7. Sync architecture diagrams
+	// 8. Sync architecture diagrams
 	if len(cfg.ArchitectureDiagrams) > 0 {
 		fmt.Printf("\n📊 Syncing %d architecture %s...\n", len(cfg.ArchitectureDiagrams), pluralize(len(cfg.ArchitectureDiagrams), "diagram", "diagrams"))
 
@@ -208,7 +249,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 8. Sync test packs and test cases
+	// 9. Sync test packs and test cases
 	totalTestCases := 0
 	for _, pack := range cfg.TestPacks {
 		totalTestCases += len(pack.TestCases)
@@ -360,47 +401,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 		if dryRun {
 			fmt.Printf("\n=== DRY RUN: would sync %d test pack(s), %d test case(s)\n", len(cfg.TestPacks), totalTestCases)
-		}
-	}
-
-	// 9. Sync service databases
-	if len(cfg.Databases) > 0 {
-		fmt.Printf("\n🗄️  Syncing %d database %s...\n", len(cfg.Databases), pluralize(len(cfg.Databases), "schema", "schemas"))
-		gitMinimal := gateway.GitMetadataMinimal{CommitHash: gitMeta.CommitHash}
-		serviceName := cfg.Service.Name
-
-		for _, db := range cfg.Databases {
-			fmt.Printf("  • %s (%s)\n", db.Name, db.Dialect)
-
-			schemaBytes, err := os.ReadFile(db.SchemaPath)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "    Error reading schema file %s: %v\n", db.SchemaPath, err)
-				os.Exit(1)
-			}
-
-			req := gateway.ServiceDatabaseSyncRequest{
-				ServiceName:       serviceName,
-				DBName:            db.Name,
-				Dialect:           db.Dialect,
-				DBType:            db.DBType,
-				SchemaFileContent: string(schemaBytes),
-				Git:               gitMinimal,
-			}
-
-			if dryRun {
-				fmt.Printf("\n=== DRY RUN: Service Database (%s) ===\n", db.Name)
-				fmt.Printf("  SchemaPath: %s, size: %d bytes\n", db.SchemaPath, len(schemaBytes))
-			} else {
-				resp, err := client.SyncServiceDatabase(ctx, req)
-				if err != nil {
-					exitGatewayError(fmt.Sprintf("sync database schema %q", db.Name))
-				}
-				versionNote := ""
-				if resp.VersionCreated {
-					versionNote = " (new version)"
-				}
-				fmt.Printf("    ✓ Database schema synced: %s%s\n", db.Name, versionNote)
-			}
 		}
 	}
 

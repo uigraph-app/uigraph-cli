@@ -2,8 +2,9 @@ uigraph-sync:
   stage: deploy
   image: golang:1.23
   script:
-    - curl -sSL https://cli.uigraph.app/install.sh | sh
-    - uigraph sync
+    - go install github.com/uigraph-app/uigraph-cli@latest
+    - export PATH="$PATH:$(go env GOPATH)/bin"
+    - uigraph-cli sync
   only:
     - main
     - master
@@ -17,8 +18,9 @@ uigraph-sync-dry-run:
   stage: test
   image: golang:1.23
   script:
-    - curl -sSL https://cli.uigraph.app/install.sh | sh
-    - uigraph sync --dry-run
+    - go install github.com/uigraph-app/uigraph-cli@latest
+    - export PATH="$PATH:$(go env GOPATH)/bin"
+    - uigraph-cli sync --dry-run
   only:
     - merge_requests
   variables:
