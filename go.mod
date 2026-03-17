@@ -1,4 +1,4 @@
-module github.com/uigraph/uigraph-cli
+module github.com/uigraph-app/uigraph-cli
 
 go 1.23.0
 

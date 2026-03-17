@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/uigraph/uigraph-cli/pkg/config"
-	"github.com/uigraph/uigraph-cli/pkg/gateway"
-	"github.com/uigraph/uigraph-cli/pkg/git"
+	"github.com/uigraph-app/uigraph-cli/pkg/config"
+	"github.com/uigraph-app/uigraph-cli/pkg/gateway"
+	"github.com/uigraph-app/uigraph-cli/pkg/git"
 )
 
 var (
