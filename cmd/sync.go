@@ -1,8 +1,16 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -404,7 +412,83 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 10. Print summary
+	// 10. Sync service docs
+	if len(cfg.Docs) > 0 {
+		fmt.Printf("\n📄 Syncing %d documentation %s...\n", len(cfg.Docs), pluralize(len(cfg.Docs), "file", "files"))
+		serviceName := cfg.Service.Name
+
+		for _, doc := range cfg.Docs {
+			fmt.Printf("  • %s (%s)\n", doc.Name, doc.Path)
+
+			fileContent, err := os.ReadFile(doc.Path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "    Error reading doc file %s: %v\n", doc.Path, err)
+				os.Exit(1)
+			}
+
+			sum := sha256.Sum256(fileContent)
+			contentHash := hex.EncodeToString(sum[:])
+			fileSize := int64(len(fileContent))
+
+			prepReq := gateway.ServiceDocPrepareRequest{
+				ServiceName: serviceName,
+				DocName:     doc.Name,
+				ContentHash: contentHash,
+				FileSize:    fileSize,
+				FilePath:    doc.Path,
+				FileType:    doc.FileType,
+				Description: doc.Description,
+			}
+
+			if dryRun {
+				fmt.Printf("\n=== DRY RUN: Service Doc (%s) ===\n", doc.Name)
+				fmt.Printf("  Path: %s, size: %d bytes, hash: %s\n", doc.Path, fileSize, contentHash)
+				continue
+			}
+
+			prepResp, err := client.PrepareServiceDocUpload(ctx, prepReq)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "    ✗ Prepare failed: %v\n", err)
+				exitGatewayError(fmt.Sprintf("prepare doc upload for %q", doc.Name))
+			}
+
+			if prepResp.Action == "skip" {
+				fmt.Printf("    ✓ Unchanged (skipped)\n")
+				continue
+			}
+
+			if prepResp.Action == "upload" {
+				if prepResp.UploadURL == nil || prepResp.FileID == nil {
+					fmt.Fprintf(os.Stderr, "    ✗ Invalid prepare response (missing uploadUrl or fileId)\n")
+					exitGatewayError(fmt.Sprintf("prepare doc upload for %q", doc.Name))
+				}
+
+				if err := uploadToS3(ctx, *prepResp.UploadURL, fileContent, doc.FileType, doc.Path); err != nil {
+					fmt.Fprintf(os.Stderr, "    ✗ Upload failed: %v\n", err)
+					exitGatewayError(fmt.Sprintf("upload doc to S3 for %q", doc.Name))
+				}
+
+				completeReq := gateway.ServiceDocCompleteRequest{
+					ServiceName: serviceName,
+					DocName:     doc.Name,
+					FileID:      *prepResp.FileID,
+					ContentHash: contentHash,
+					FileType:    doc.FileType,
+					Description: doc.Description,
+				}
+
+				_, err := client.CompleteServiceDocUpload(ctx, completeReq)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "    ✗ Finalize failed: %v\n", err)
+					exitGatewayError(fmt.Sprintf("complete doc upload for %q", doc.Name))
+				}
+
+				fmt.Printf("    ✓ Synced\n")
+			}
+		}
+	}
+
+	// 11. Print summary
 	elapsed := time.Since(startTime)
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("📋 Sync Summary")
@@ -418,6 +502,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Test Packs: %d\n", len(cfg.TestPacks))
 	fmt.Printf("Test Cases: %d\n", totalTestCases)
 	fmt.Printf("Databases: %d\n", len(cfg.Databases))
+	fmt.Printf("Docs: %d\n", len(cfg.Docs))
 	fmt.Printf("Duration: %s\n", formatDuration(elapsed))
 	if dryRun {
 		fmt.Println("\n(Dry run - no data sent to gateway)")
@@ -425,3 +510,66 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	return nil
 }
+
+// uploadToS3 uploads file content to S3 using a presigned URL
+func uploadToS3(ctx context.Context, presignedURL string, content []byte, fileType, filePath string) error {
+	contentType := resolveContentTypeForUpload(fileType, filePath)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, presignedURL, bytes.NewReader(content))
+	if err != nil {
+		return fmt.Errorf("failed to create S3 upload request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", contentType)
+
+	client := &http.Client{Timeout: 60 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("S3 upload request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("S3 upload failed with status %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
+// resolveContentTypeForUpload determines the content type for S3 upload
+func resolveContentTypeForUpload(fileType, filePath string) string {
+	if fileType != "" {
+		switch fileType {
+		case "pdf":
+			return "application/pdf"
+		case "html":
+			return "text/html"
+		case "markdown":
+			return "text/markdown"
+		case "doc":
+			return "application/msword"
+		case "txt":
+			return "text/plain"
+		}
+	}
+
+	if filePath != "" {
+		ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filePath), "."))
+		switch ext {
+		case "pdf":
+			return "application/pdf"
+		case "html", "htm":
+			return "text/html"
+		case "md", "markdown":
+			return "text/markdown"
+		case "doc", "docx":
+			return "application/msword"
+		case "txt":
+			return "text/plain"
+		}
+	}
+
+	return "application/octet-stream"
+}
+

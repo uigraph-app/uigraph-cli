@@ -189,6 +189,43 @@ type TestCaseSyncResponse struct {
 	Message string `json:"message,omitempty"`
 }
 
+// ServiceDocPrepareRequest is the request to prepare a doc upload
+type ServiceDocPrepareRequest struct {
+	ServiceName string `json:"serviceName"`
+	DocName     string `json:"docName"`
+	ContentHash string `json:"contentHash"`
+	FileSize    int64  `json:"fileSize"`
+	FilePath    string `json:"filePath,omitempty"`
+	FileType    string `json:"fileType,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// ServiceDocPrepareResponse tells the CLI whether to upload or skip
+type ServiceDocPrepareResponse struct {
+	Action       string  `json:"action"`
+	Reason       string  `json:"reason,omitempty"`
+	UploadURL    *string `json:"uploadUrl,omitempty"`
+	FileID       *string `json:"fileId,omitempty"`
+	ExistingHash *string `json:"existingHash,omitempty"`
+}
+
+// ServiceDocCompleteRequest is the request to complete a doc upload
+type ServiceDocCompleteRequest struct {
+	ServiceName string `json:"serviceName"`
+	DocName     string `json:"docName"`
+	FileID      string `json:"fileId"`
+	ContentHash string `json:"contentHash"`
+	FileType    string `json:"fileType,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+// ServiceDocCompleteResponse is the response after completing doc upload
+type ServiceDocCompleteResponse struct {
+	Name       string `json:"name"`
+	Message    string `json:"message"`
+	ServiceDoc string `json:"serviceDocId,omitempty"`
+}
+
 // ServiceDatabaseSyncRequest is the request payload for syncing a service database schema.
 // The CLI sends raw file content; the gateway parses it via the adapter (SQL or NoSQL).
 type ServiceDatabaseSyncRequest struct {
@@ -405,6 +442,86 @@ func (c *Client) SyncTestCase(ctx context.Context, req TestCaseSyncRequest) (*Te
 	}
 
 	return &syncResp, nil
+}
+
+// PrepareServiceDocUpload prepares a service doc upload (checks if upload needed, returns presigned URL)
+func (c *Client) PrepareServiceDocUpload(ctx context.Context, req ServiceDocPrepareRequest) (*ServiceDocPrepareResponse, error) {
+	url := fmt.Sprintf("%s/v1/sync/service/doc/prepare", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Token", c.token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, formatGatewayError(resp.StatusCode, respBody)
+	}
+
+	var prepResp ServiceDocPrepareResponse
+	if err := json.Unmarshal(respBody, &prepResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &prepResp, nil
+}
+
+// CompleteServiceDocUpload completes a service doc upload after S3 upload succeeds
+func (c *Client) CompleteServiceDocUpload(ctx context.Context, req ServiceDocCompleteRequest) (*ServiceDocCompleteResponse, error) {
+	url := fmt.Sprintf("%s/v1/sync/service/doc/complete", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Token", c.token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, formatGatewayError(resp.StatusCode, respBody)
+	}
+
+	var completeResp ServiceDocCompleteResponse
+	if err := json.Unmarshal(respBody, &completeResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &completeResp, nil
 }
 
 // SyncServiceDatabase syncs a service database schema to the gateway

@@ -16,6 +16,7 @@ type Config struct {
 	ArchitectureDiagrams []ArchDiagramRef `yaml:"architectureDiagrams,omitempty"`
 	TestPacks            []TestPackRef    `yaml:"testPacks,omitempty"`
 	Databases            []DatabaseRef    `yaml:"databases,omitempty"`
+	Docs                 []DocRef         `yaml:"docs,omitempty"`
 }
 
 // Project represents project-level metadata
@@ -130,6 +131,14 @@ type TestCaseRef struct {
 	Postconditions   string    `yaml:"postconditions,omitempty"`
 	RequiresEvidence bool      `yaml:"requiresEvidence"`
 	IsCritical       bool      `yaml:"isCritical"`
+}
+
+// DocRef represents a documentation file to sync
+type DocRef struct {
+	Name        string `yaml:"name"`                  // Display name used for upsert matching
+	Path        string `yaml:"path"`                  // path to the file
+	FileType    string `yaml:"fileType,omitempty"`    // pdf, html, markdown, doc, other (auto-detected from extension if omitted)
+	Description string `yaml:"description,omitempty"` // optional description
 }
 
 // DatabaseRef represents a service database schema to sync (path to JSON schema file)
@@ -252,6 +261,23 @@ func (c *Config) Validate() error {
 			if tc.Title == "" {
 				return fmt.Errorf("testPacks[%d].testCases[%d].title is required", i, j)
 			}
+		}
+	}
+
+	// Docs validation (optional)
+	validFileTypes := map[string]bool{"pdf": true, "html": true, "markdown": true, "doc": true, "other": true}
+	for i, doc := range c.Docs {
+		if doc.Name == "" {
+			return fmt.Errorf("docs[%d].name is required", i)
+		}
+		if doc.Path == "" {
+			return fmt.Errorf("docs[%d].path is required", i)
+		}
+		if _, err := os.Stat(doc.Path); os.IsNotExist(err) {
+			return fmt.Errorf("docs[%d].path file does not exist: %s", i, doc.Path)
+		}
+		if doc.FileType != "" && !validFileTypes[doc.FileType] {
+			return fmt.Errorf("docs[%d].fileType must be one of: pdf, html, markdown, doc, other", i)
 		}
 	}
 
