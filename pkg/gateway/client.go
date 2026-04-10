@@ -244,6 +244,101 @@ type ServiceDatabaseSyncResponse struct {
 	VersionCreated bool   `json:"versionCreated,omitempty"`
 }
 
+// MapSyncRequest is the request to upsert a map by name
+type MapSyncRequest struct {
+	MapName     string `json:"mapName"`
+	Description string `json:"description,omitempty"`
+}
+
+// MapSyncResponse is the response after map upsert
+type MapSyncResponse struct {
+	MapID   string `json:"mapId"`
+	Message string `json:"message"`
+}
+
+// FramePrepareRequest is the request to prepare a frame upsert (with optional image SHA check)
+type FramePrepareRequest struct {
+	MapName     string `json:"mapName"`
+	FrameName   string `json:"frameName"`
+	Description string `json:"description,omitempty"`
+	ContentHash string `json:"contentHash,omitempty"`
+	FileSize    int64  `json:"fileSize,omitempty"`
+	ImagePath   string `json:"imagePath,omitempty"`
+}
+
+// FramePrepareResponse tells the CLI what to do next
+type FramePrepareResponse struct {
+	Action    string  `json:"action"` // "done", "skip", "upload"
+	PageID    string  `json:"pageId"`
+	UploadURL *string `json:"uploadUrl,omitempty"`
+	FileID    *string `json:"fileId,omitempty"`
+	Message   string  `json:"message,omitempty"`
+}
+
+// FrameCompleteRequest finalizes a frame after S3 image upload
+type FrameCompleteRequest struct {
+	MapName     string `json:"mapName"`
+	FrameName   string `json:"frameName"`
+	FileID      string `json:"fileId"`
+	ContentHash string `json:"contentHash"`
+	Description string `json:"description,omitempty"`
+}
+
+// FrameCompleteResponse is the response after frame finalization
+type FrameCompleteResponse struct {
+	PageID  string `json:"pageId"`
+	Message string `json:"message"`
+}
+
+// FocalPointSyncRequest is the request to upsert a focal point by name
+type FocalPointSyncRequest struct {
+	MapName        string  `json:"mapName"`
+	FrameName      string  `json:"frameName"`
+	FocalPointName string  `json:"focalPointName"`
+	X              float64 `json:"x"`
+	Y              float64 `json:"y"`
+	Visibility     string  `json:"visibility,omitempty"`
+}
+
+// FocalPointSyncResponse is the response after focal point upsert
+type FocalPointSyncResponse struct {
+	FocalPointID string `json:"focalPointId"`
+	PageID       string `json:"pageId"`
+	Message      string `json:"message"`
+}
+
+// ComponentFieldItem is a single component modal field for sync
+type ComponentFieldItem struct {
+	ComponentFieldID string        `json:"componentFieldId"`
+	Label            string        `json:"label"`
+	Type             string        `json:"type,omitempty"`
+	Data             []interface{} `json:"data,omitempty"`
+}
+
+// FocalPointMetaSyncRequest is the request to upsert focal point meta
+type FocalPointMetaSyncRequest struct {
+	MapName              string               `json:"mapName"`
+	FrameName            string               `json:"frameName"`
+	FocalPointName       string               `json:"focalPointName"`
+	ComponentID          string               `json:"componentId"`
+	ComponentLinkID      string               `json:"componentLinkId,omitempty"`
+	ComponentModalFields []ComponentFieldItem `json:"componentModalFields,omitempty"`
+	ServiceName          string               `json:"serviceName,omitempty"`
+	APIGroupName         string               `json:"apiGroupName,omitempty"`
+	OperationID          string               `json:"operationId,omitempty"`
+	TestPackName         string               `json:"testPackName,omitempty"`
+	DocName              string               `json:"docName,omitempty"`
+	ArchitectureDiagramName string            `json:"architectureDiagramName,omitempty"`
+}
+
+// FocalPointMetaSyncResponse is the response after focal point meta upsert
+type FocalPointMetaSyncResponse struct {
+	FocalPointMetaID string `json:"focalPointMetaId"`
+	FocalPointID     string `json:"focalPointId"`
+	ComponentID      string `json:"componentId"`
+	Message          string `json:"message"`
+}
+
 // SyncService syncs a service to the gateway
 func (c *Client) SyncService(ctx context.Context, req ServiceSyncRequest) (*ServiceSyncResponse, error) {
 	url := fmt.Sprintf("%s/v1/sync/service", c.baseURL)
@@ -524,6 +619,197 @@ func (c *Client) CompleteServiceDocUpload(ctx context.Context, req ServiceDocCom
 	return &completeResp, nil
 }
 
+// SyncMap upserts a map (project) by name
+func (c *Client) SyncMap(ctx context.Context, req MapSyncRequest) (*MapSyncResponse, error) {
+	url := fmt.Sprintf("%s/v1/sync/map", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Token", c.token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, formatGatewayError(resp.StatusCode, respBody)
+	}
+
+	var syncResp MapSyncResponse
+	if err := json.Unmarshal(respBody, &syncResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &syncResp, nil
+}
+
+// PrepareFrameSync prepares a frame upsert and checks if the image needs uploading
+func (c *Client) PrepareFrameSync(ctx context.Context, req FramePrepareRequest) (*FramePrepareResponse, error) {
+	url := fmt.Sprintf("%s/v1/sync/frame/prepare", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Token", c.token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, formatGatewayError(resp.StatusCode, respBody)
+	}
+
+	var prepResp FramePrepareResponse
+	if err := json.Unmarshal(respBody, &prepResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &prepResp, nil
+}
+
+// CompleteFrameSync finalizes a frame after S3 image upload
+func (c *Client) CompleteFrameSync(ctx context.Context, req FrameCompleteRequest) (*FrameCompleteResponse, error) {
+	url := fmt.Sprintf("%s/v1/sync/frame/complete", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Token", c.token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, formatGatewayError(resp.StatusCode, respBody)
+	}
+
+	var completeResp FrameCompleteResponse
+	if err := json.Unmarshal(respBody, &completeResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	return &completeResp, nil
+}
+
+// SyncFocalPoint upserts a focal point by name within a map/frame
+func (c *Client) SyncFocalPoint(ctx context.Context, req FocalPointSyncRequest) (*FocalPointSyncResponse, error) {
+	url := fmt.Sprintf("%s/v1/sync/focal-point", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Token", c.token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, formatGatewayError(resp.StatusCode, respBody)
+	}
+
+	var syncResp FocalPointSyncResponse
+	if err := json.Unmarshal(respBody, &syncResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &syncResp, nil
+}
+
+// SyncFocalPointMeta upserts focal point meta (component link) within a named focal point
+func (c *Client) SyncFocalPointMeta(ctx context.Context, req FocalPointMetaSyncRequest) (*FocalPointMetaSyncResponse, error) {
+	url := fmt.Sprintf("%s/v1/sync/focal-point-meta", c.baseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-API-Token", c.token)
+
+	resp, err := c.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, formatGatewayError(resp.StatusCode, respBody)
+	}
+
+	var syncResp FocalPointMetaSyncResponse
+	if err := json.Unmarshal(respBody, &syncResp); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &syncResp, nil
+}
+
 // SyncServiceDatabase syncs a service database schema to the gateway
 func (c *Client) SyncServiceDatabase(ctx context.Context, req ServiceDatabaseSyncRequest) (*ServiceDatabaseSyncResponse, error) {
 	url := fmt.Sprintf("%s/v1/sync/service/database", c.baseURL)
@@ -628,6 +914,12 @@ func formatGatewayError(statusCode int, respBody []byte) error {
 		}
 		return fmt.Errorf("rate limit exceeded - too many requests, please try again later")
 	case http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable:
+		var errResp struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.Message != "" {
+			return fmt.Errorf("%s", errResp.Message)
+		}
 		return fmt.Errorf("service temporarily unavailable - please try again")
 	default:
 		return fmt.Errorf("sync failed with status %d - please try again", statusCode)

@@ -17,6 +17,54 @@ type Config struct {
 	TestPacks            []TestPackRef    `yaml:"testPacks,omitempty"`
 	Databases            []DatabaseRef    `yaml:"databases,omitempty"`
 	Docs                 []DocRef         `yaml:"docs,omitempty"`
+	Maps                 []MapRef         `yaml:"maps,omitempty"`
+}
+
+// MapRef represents a UIGraph Map (Project) with nested Frames and Focal Points
+type MapRef struct {
+	Name        string     `yaml:"name"`
+	Description string     `yaml:"description,omitempty"`
+	Frames      []FrameRef `yaml:"frames,omitempty"`
+}
+
+// FrameRef represents a Frame (Page) within a Map
+type FrameRef struct {
+	Name        string          `yaml:"name"`
+	Description string          `yaml:"description,omitempty"`
+	ImagePath   string          `yaml:"imagePath,omitempty"` // path to background image for the frame canvas
+	FocalPoints []FocalPointRef `yaml:"focalPoints,omitempty"`
+}
+
+// FocalPointRef represents a focal point node within a Frame
+type FocalPointRef struct {
+	Name        string               `yaml:"name"`
+	X           float64              `yaml:"x"`
+	Y           float64              `yaml:"y"`
+	Visibility  string               `yaml:"visibility,omitempty"` // public | private; defaults to public
+	Components  []FocalPointMetaRef  `yaml:"components,omitempty"`
+}
+
+// FocalPointMetaRef represents a component linked to a focal point
+type FocalPointMetaRef struct {
+	// ComponentID identifies the component type, e.g.:
+	//   component_api-contract
+	//   component_test-case-suite
+	//   component_support-kb-troubleshooting
+	ComponentID string `yaml:"componentId"`
+
+	// ComponentLinkID is the direct link ID (use this when you know the ID).
+	// Alternatively, use the name-based fields below for human-friendly config.
+	ComponentLinkID string `yaml:"componentLinkId,omitempty"`
+
+	// Name-based resolution (gateway resolves to componentLinkId at sync time)
+	ServiceName  string `yaml:"serviceName,omitempty"`  // service that owns the linked entity
+	APIGroupName string `yaml:"apiGroupName,omitempty"` // for component_api-contract
+	// OperationID is the OpenAPI operationId (must match synced spec); resolves to componentMetaId like the UI.
+	OperationID  string `yaml:"operationId,omitempty"`
+	TestPackName string `yaml:"testPackName,omitempty"` // for component_test-case-suite
+	DocName      string `yaml:"docName,omitempty"`      // for component_support-kb-troubleshooting
+	// ArchitectureDiagramName matches architectureDiagrams[].name / synced diagram name (component_backend-flow-diagram).
+	ArchitectureDiagramName string `yaml:"architectureDiagramName,omitempty"`
 }
 
 // Project represents project-level metadata
@@ -278,6 +326,55 @@ func (c *Config) Validate() error {
 		}
 		if doc.FileType != "" && !validFileTypes[doc.FileType] {
 			return fmt.Errorf("docs[%d].fileType must be one of: pdf, html, markdown, doc, other", i)
+		}
+	}
+
+	// Maps validation (optional)
+	validComponentIDs := map[string]bool{
+		"component_api-contract":               true,
+		"component_test-case-suite":            true,
+		"component_support-kb-troubleshooting": true,
+		"component_backend-flow-diagram":       true,
+	}
+	for i, m := range c.Maps {
+		if m.Name == "" {
+			return fmt.Errorf("maps[%d].name is required", i)
+		}
+		for j, frame := range m.Frames {
+			if frame.Name == "" {
+				return fmt.Errorf("maps[%d].frames[%d].name is required", i, j)
+			}
+			if frame.ImagePath != "" {
+				if _, err := os.Stat(frame.ImagePath); os.IsNotExist(err) {
+					return fmt.Errorf("maps[%d].frames[%d].imagePath file does not exist: %s", i, j, frame.ImagePath)
+				}
+			}
+			for k, fp := range frame.FocalPoints {
+				if fp.Name == "" {
+					return fmt.Errorf("maps[%d].frames[%d].focalPoints[%d].name is required", i, j, k)
+				}
+				for l, comp := range fp.Components {
+					if comp.ComponentID == "" {
+						return fmt.Errorf("maps[%d].frames[%d].focalPoints[%d].components[%d].componentId is required", i, j, k, l)
+					}
+					if !validComponentIDs[comp.ComponentID] {
+						return fmt.Errorf("maps[%d].frames[%d].focalPoints[%d].components[%d].componentId '%s' is not valid", i, j, k, l, comp.ComponentID)
+					}
+					if comp.ComponentLinkID == "" && comp.ServiceName == "" {
+						return fmt.Errorf("maps[%d].frames[%d].focalPoints[%d].components[%d]: either componentLinkId or serviceName is required", i, j, k, l)
+					}
+					if comp.ComponentID == "component_backend-flow-diagram" && comp.ComponentLinkID == "" {
+						if comp.ServiceName == "" || comp.ArchitectureDiagramName == "" {
+							return fmt.Errorf("maps[%d].frames[%d].focalPoints[%d].components[%d]: component_backend-flow-diagram requires componentLinkId, or both serviceName and architectureDiagramName", i, j, k, l)
+						}
+					}
+					if comp.ComponentID == "component_api-contract" && comp.ComponentLinkID == "" {
+						if comp.ServiceName == "" || comp.APIGroupName == "" || comp.OperationID == "" {
+							return fmt.Errorf("maps[%d].frames[%d].focalPoints[%d].components[%d]: component_api-contract requires componentLinkId, or serviceName, apiGroupName, and operationId", i, j, k, l)
+						}
+					}
+				}
+			}
 		}
 	}
 

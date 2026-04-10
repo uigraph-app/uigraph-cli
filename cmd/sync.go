@@ -488,7 +488,165 @@ func runSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 11. Print summary
+	// 11. Sync maps (focal points and component links)
+	totalFrames := 0
+	totalFocalPoints := 0
+	totalComponents := 0
+	for _, m := range cfg.Maps {
+		totalFrames += len(m.Frames)
+		for _, frame := range m.Frames {
+			totalFocalPoints += len(frame.FocalPoints)
+			for _, fp := range frame.FocalPoints {
+				totalComponents += len(fp.Components)
+			}
+		}
+	}
+	if len(cfg.Maps) > 0 {
+		fmt.Printf("\n🗺️  Syncing %d %s (%d %s, %d focal %s, %d %s)...\n",
+			len(cfg.Maps), pluralize(len(cfg.Maps), "map", "maps"),
+			totalFrames, pluralize(totalFrames, "frame", "frames"),
+			totalFocalPoints, pluralize(totalFocalPoints, "point", "points"),
+			totalComponents, pluralize(totalComponents, "component", "components"))
+
+		for _, m := range cfg.Maps {
+			fmt.Printf("  • Map: %s\n", m.Name)
+
+			if dryRun {
+				fmt.Printf("    [DRY RUN] Would sync map: %s\n", m.Name)
+				for _, frame := range m.Frames {
+					imgNote := ""
+					if frame.ImagePath != "" {
+						imgNote = fmt.Sprintf(" (image: %s)", frame.ImagePath)
+					}
+					fmt.Printf("      Frame: %s%s\n", frame.Name, imgNote)
+					for _, fp := range frame.FocalPoints {
+						fmt.Printf("        Focal point: %s (x:%.0f y:%.0f)\n", fp.Name, fp.X, fp.Y)
+						for _, comp := range fp.Components {
+							fmt.Printf("          - %s (link:%s svc:%s)\n", comp.ComponentID, comp.ComponentLinkID, comp.ServiceName)
+						}
+					}
+				}
+				continue
+			}
+
+			// Sync map
+			_, err := client.SyncMap(ctx, gateway.MapSyncRequest{
+				MapName:     m.Name,
+				Description: m.Description,
+			})
+			if err != nil {
+				exitGatewayError(fmt.Sprintf("sync map %q", m.Name))
+			}
+			fmt.Printf("    ✓ Map synced: %s\n", m.Name)
+
+			for _, frame := range m.Frames {
+				fmt.Printf("    Frame: %s\n", frame.Name)
+
+				// Sync frame (with optional image SHA check)
+				prepReq := gateway.FramePrepareRequest{
+					MapName:     m.Name,
+					FrameName:   frame.Name,
+					Description: frame.Description,
+					ImagePath:   frame.ImagePath,
+				}
+
+				if frame.ImagePath != "" {
+					imageBytes, err := os.ReadFile(frame.ImagePath)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "      Error reading image file %s: %v\n", frame.ImagePath, err)
+						os.Exit(1)
+					}
+					sum := sha256.Sum256(imageBytes)
+					prepReq.ContentHash = hex.EncodeToString(sum[:])
+					prepReq.FileSize = int64(len(imageBytes))
+
+					prepResp, err := client.PrepareFrameSync(ctx, prepReq)
+					if err != nil {
+						exitGatewayError(fmt.Sprintf("prepare frame %q", frame.Name))
+					}
+
+					switch prepResp.Action {
+					case "skip":
+						fmt.Printf("      ✓ Frame synced (image unchanged): %s\n", frame.Name)
+					case "upload":
+						if prepResp.UploadURL == nil || prepResp.FileID == nil {
+							fmt.Fprintf(os.Stderr, "      ✗ Invalid prepare response for frame %s\n", frame.Name)
+							os.Exit(1)
+						}
+						if err := uploadToS3(ctx, *prepResp.UploadURL, imageBytes, "image", frame.ImagePath); err != nil {
+							fmt.Fprintf(os.Stderr, "      ✗ Image upload failed: %v\n", err)
+							exitGatewayError(fmt.Sprintf("upload image for frame %q", frame.Name))
+						}
+						_, err := client.CompleteFrameSync(ctx, gateway.FrameCompleteRequest{
+							MapName:     m.Name,
+							FrameName:   frame.Name,
+							FileID:      *prepResp.FileID,
+							ContentHash: prepReq.ContentHash,
+							Description: frame.Description,
+						})
+						if err != nil {
+							exitGatewayError(fmt.Sprintf("complete frame image sync for %q", frame.Name))
+						}
+						fmt.Printf("      ✓ Frame synced (image updated): %s\n", frame.Name)
+					case "done":
+						fmt.Printf("      ✓ Frame synced: %s\n", frame.Name)
+					}
+				} else {
+					// No image — metadata-only sync
+					prepResp, err := client.PrepareFrameSync(ctx, prepReq)
+					if err != nil {
+						exitGatewayError(fmt.Sprintf("sync frame %q", frame.Name))
+					}
+					_ = prepResp
+					fmt.Printf("      ✓ Frame synced: %s\n", frame.Name)
+				}
+
+				// Sync focal points within this frame
+				for _, fp := range frame.FocalPoints {
+					visibility := fp.Visibility
+					if visibility == "" {
+						visibility = "public"
+					}
+
+					fpResp, err := client.SyncFocalPoint(ctx, gateway.FocalPointSyncRequest{
+						MapName:        m.Name,
+						FrameName:      frame.Name,
+						FocalPointName: fp.Name,
+						X:              fp.X,
+						Y:              fp.Y,
+						Visibility:     visibility,
+					})
+					if err != nil {
+						exitGatewayError(fmt.Sprintf("sync focal point %q in frame %q", fp.Name, frame.Name))
+					}
+					_ = fpResp
+					fmt.Printf("        ✓ Focal point: %s\n", fp.Name)
+
+					for _, comp := range fp.Components {
+						_, err := client.SyncFocalPointMeta(ctx, gateway.FocalPointMetaSyncRequest{
+							MapName:                 m.Name,
+							FrameName:               frame.Name,
+							FocalPointName:          fp.Name,
+							ComponentID:             comp.ComponentID,
+							ComponentLinkID:         comp.ComponentLinkID,
+							ServiceName:             comp.ServiceName,
+							APIGroupName:            comp.APIGroupName,
+							OperationID:             comp.OperationID,
+							TestPackName:            comp.TestPackName,
+							DocName:                 comp.DocName,
+							ArchitectureDiagramName: comp.ArchitectureDiagramName,
+						})
+						if err != nil {
+							exitGatewayError(fmt.Sprintf("sync component %q for focal point %q", comp.ComponentID, fp.Name))
+						}
+						fmt.Printf("          ✓ Component: %s\n", comp.ComponentID)
+					}
+				}
+			}
+		}
+	}
+
+	// 12. Print summary
 	elapsed := time.Since(startTime)
 	fmt.Println("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	fmt.Println("📋 Sync Summary")
@@ -503,6 +661,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Test Cases: %d\n", totalTestCases)
 	fmt.Printf("Databases: %d\n", len(cfg.Databases))
 	fmt.Printf("Docs: %d\n", len(cfg.Docs))
+	fmt.Printf("Maps: %d (Frames: %d, Focal Points: %d, Components: %d)\n", len(cfg.Maps), totalFrames, totalFocalPoints, totalComponents)
 	fmt.Printf("Duration: %s\n", formatDuration(elapsed))
 	if dryRun {
 		fmt.Println("\n(Dry run - no data sent to gateway)")
@@ -537,7 +696,9 @@ func uploadToS3(ctx context.Context, presignedURL string, content []byte, fileTy
 	return nil
 }
 
-// resolveContentTypeForUpload determines the content type for S3 upload
+// resolveContentTypeForUpload determines the content type for S3 upload.
+// It must match what uigraph-gateway sends when presigning (see v1SyncFramePrepare.resolveContentType
+// and v1SyncServiceDocPrepare.resolveContentType); otherwise S3 returns 403 SignatureDoesNotMatch.
 func resolveContentTypeForUpload(fileType, filePath string) string {
 	if fileType != "" {
 		switch fileType {
@@ -551,6 +712,8 @@ func resolveContentTypeForUpload(fileType, filePath string) string {
 			return "application/msword"
 		case "txt":
 			return "text/plain"
+		case "image":
+			return contentTypeForImagePath(filePath)
 		}
 	}
 
@@ -567,9 +730,41 @@ func resolveContentTypeForUpload(fileType, filePath string) string {
 			return "application/msword"
 		case "txt":
 			return "text/plain"
+		case "png":
+			return "image/png"
+		case "jpg", "jpeg":
+			return "image/jpeg"
+		case "gif":
+			return "image/gif"
+		case "webp":
+			return "image/webp"
+		case "svg":
+			return "image/svg+xml"
 		}
 	}
 
 	return "application/octet-stream"
+}
+
+// contentTypeForImagePath matches gateway endpoints/sync/v1SyncFramePrepare resolveContentType (default image/png).
+func contentTypeForImagePath(filePath string) string {
+	ext := ""
+	if filePath != "" {
+		ext = strings.ToLower(strings.TrimPrefix(filepath.Ext(filePath), "."))
+	}
+	switch ext {
+	case "png":
+		return "image/png"
+	case "jpg", "jpeg":
+		return "image/jpeg"
+	case "gif":
+		return "image/gif"
+	case "webp":
+		return "image/webp"
+	case "svg":
+		return "image/svg+xml"
+	default:
+		return "image/png"
+	}
 }
 
